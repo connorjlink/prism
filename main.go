@@ -86,22 +86,7 @@ func (fp *FontParser) Parse() {
 	}
 	defer fontFile.Close()
 
-	/*
-	   TODO
-	     1. File parsing
-	        - Offset table
-	        - Table directory
-	        - Required tables:
-	          - head
-	          - maxp
-	          - loca
-	          - glyf
-	          - cmap
-
-	     2. Glyph loading
-	        - Map character → glyph index (cmap)
-	        - Read glyph outline from glyf
-	*/
+	
 }
 
 type Cursor struct {
