@@ -4,9 +4,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"unicode"
+
+	"golang.org/x/exp/mmap"
 )
 
 // thread-synchronized error stream for logging
@@ -47,17 +50,7 @@ func NewWindow() Window {
 	}
 }
 
-// Quadratic bezier curves only
-type Point struct {
-	X float32
-	Y float32
-}
-
-type Spline struct {
-	StartPoint   Point
-	ControlPoint Point
-	EndPoint     Point
-}
+//region FontParser
 
 type Glyph struct {
 	Character rune
@@ -78,36 +71,65 @@ func NewFontParser(fontPath string) *FontParser {
 	}
 }
 
-func (fp *FontParser) Parse() {
-	fontFile, err := os.Open(fp.FontPath)
-	if err != nil {
-		fmt.Fprintf(errorStream(), "Error: Could not open font file at path '%s'\n", fp.FontPath)
-		return
-	}
-	defer fontFile.Close()
+//endregion
 
-	
-}
+//region FontRenderer
 
 type Cursor struct {
 	X uint32
 	Y uint32
 }
 
-type FontRenderer struct {
-	FontParser *FontParser
-	Cursor     Cursor
+type AtlasEntry struct {
+	Character rune
+	X         uint32
+	Y         uint32
+	Width     uint32
+	Height    uint32
 }
 
-func NewFontRenderer(fontParser *FontParser) *FontRenderer {
+type FontType int
+
+const (
+	FontTypeRegular FontType = iota
+	FontTypeBold
+	FontTypeItalic
+	FontTypeBoldItalic
+)
+
+type Atlas struct {
+	Entries  []AtlasEntry
+	Width    uint32
+	Height   uint32
+	Typeface string
+	Type     FontType
+}
+
+type FontRenderer struct {
+	Cursor   Cursor
+	Atlases  map[string][]Atlas
+	Typeface string
+	FontType FontType
+}
+
+func NewFontRenderer() *FontRenderer {
 	return &FontRenderer{
-		FontParser: fontParser,
-		Cursor:     Cursor{X: 0, Y: 0},
+		Cursor: Cursor{X: 0, Y: 0},
 	}
 }
 
 func (fr *FontRenderer) WithCursor(cursor Cursor) *FontRenderer {
 	fr.Cursor = cursor
+	return fr
+}
+
+func (fr *FontRenderer) WithTypeface(typeface string) *FontRenderer {
+	fr.Typeface = typeface
+	return fr
+}
+
+func (fr *FontRenderer) WithFontType(fontType FontType) *FontRenderer {
+	fr.FontType = fontType
 	return fr
 }
 
@@ -119,8 +141,49 @@ func (fr *FontRenderer) RenderCharacter(character rune) {
 func (fr *FontRenderer) RenderString(s string, maximumWidth uint32) {
 	_ = maximumWidth
 	for _, character := range s {
+		// TODO: text shaping engine
 		fr.RenderCharacter(character)
 	}
+}
+
+const FontAtlasFileSize = 10 * 1024 * 1024 // 10 MiB
+
+func (fr *FontRenderer) RasterizeGlyph(character *rune) {
+	// create a scratch font atlas file and memory map it
+	file := os.NewFile(0, "font-atlas.sdf")
+	if file == nil {
+		fmt.Fprintf(errorStream(), "Error: problem creating font atlas file\n")
+		return
+	}
+	defer file.Close()
+
+	mem, err := mmap.MapRegion(file, FontAtlasFileSize, mmap.RDWR)
+	if err != nil {
+		fmt.Fprintf(errorStream(), "Error: problem creating font atlas: %v\n", err)
+		return
+	}
+	defer mem.Close()
+
+	// spawn the kotlin process using command lime parameters
+	// TODO:  render 12pt, monitor DPI, 1.0 scale factor; Go here will handle GPU scale-up
+	cmd := exec.Command("java", "-jar", "font-rasterizer.jar", "--codepoint", string(character))
+	err = cmd.Start()
+	if err != nil {
+		fmt.Fprintf(errorStream(), "Error: problem starting rasterizer for glyph '%c': %v\n", character, err)
+		return
+	}
+
+	// capture the output of the process
+	err = cmd.Wait()
+	if err != nil {
+		fmt.Fprintf(errorStream(), "Error: problem waiting for rasterizer: %v\n", err)
+		return
+	}
+
+	// read the rasterized glyph data from memory mapped file
+	var atlas []byte = mem[:FontAtlasFileSize]
+
+	// TODO:
 }
 
 //region DOMNode "union"
@@ -514,7 +577,7 @@ func (js *JSInterpreter) Lex(source string) []Token {
 			numberString := string(chars[start:i])
 			number, err := strconv.ParseFloat(numberString, 64)
 			if err != nil {
-				fmt.Fprintf(errorStream(), "Error: Invalid number '%s'\n", numberString)
+				fmt.Fprintf(errorStream(), "Error: invalid number '%s'\n", numberString)
 				continue
 			}
 			tokens = append(tokens, Token{
